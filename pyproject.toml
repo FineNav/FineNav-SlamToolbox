@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+requires = ["scikit-build-core>=0.11", "pybind11>=2.12"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -8,6 +8,8 @@ version = "0.2.4"
 description = "A Python CLI tool for interactive SLAM map processing."
 readme = "README.md"
 authors = [{name = "FineNav"}]
+license = "MPL-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.9"
 dependencies = [
     "questionary>=2.0.0",

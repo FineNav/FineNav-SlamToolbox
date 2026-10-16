@@ -1,0 +1,29 @@
+FineNav-SlamToolbox
+Copyright (c) FineNav
+
+This Source Code Form is subject to the terms of the Mozilla Public
+License, v. 2.0. If a copy of the MPL was not distributed with this
+file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------
+
+本仓库源码（除下列说明外）以 MPL-2.0 许可发布。以下第三方组件由本项目的
+构建/运行流程以独立制品（Docker 镜像、预编译工作空间）形式引入，不属于
+本仓库的 MPL-2.0 授权范围，遵循其各自的上游许可证：
+
+1. ERASOR2
+   - 引入方式：docker/erasor2.Dockerfile，基于镜像 stevenmhy/erasor2:ubuntu22
+   - 说明：作为独立容器分发，通过 CLI 调用，未与本项目源码链接或合并。
+
+2. Removert
+   - 引入方式：docker/removert.Dockerfile，基于镜像 osrf/ros:noetic-desktop-full
+     并编译 slam_toolbox/removert/src 下的上游工作空间
+   - 说明：作为独立容器分发，通过 CLI 调用，未与本项目源码链接或合并。
+
+3. OctoMap、pybind11 等构建期依赖
+   - 引入方式：CMakeLists.txt 中的 find_package
+   - 说明：按各自许可证使用，本项目未分发其源码。
+
+若需确认上述组件的具体许可证条款，请参阅各自上游项目的 LICENSE 文件。

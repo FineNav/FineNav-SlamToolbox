@@ -15,9 +15,11 @@
 import glob
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 import questionary
@@ -39,6 +41,111 @@ _MESA_GL_ENV = {
     "MESA_GL_VERSION_OVERRIDE": "4.5",
     "MESA_GLSL_VERSION_OVERRIDE": "450",
 }
+
+# interactive_slam 用 Dear ImGui 内置的 13px 字体，且不读取 GNOME / Xft 缩放，
+# 在 HiDPI 屏上界面组件会显得极小。容器启动时编译这个 LD_PRELOAD 垫片，在首帧
+# 布局前按宿主机 DPI 放大字体与控件尺寸，无需改动镜像或重新编译 ROS 工作空间。
+_UI_SCALER_SOURCE = r'''
+#include <imgui.h>
+#include <dlfcn.h>
+#include <cstdlib>
+
+namespace {
+void apply_ui_scale() {
+  static bool done = false;
+  if (done) return;
+  const char* env = std::getenv("SLAM_TOOLBOX_UI_SCALE");
+  float s = env ? static_cast<float>(std::atof(env)) : 1.0f;
+  if (s <= 1.01f || s > 4.0f) { done = true; return; }
+
+  // glfwPollEvents 可能早于 ImGui::CreateContext()，此时 GetIO() 会断言失败。
+  using GetContextFn = void* (*)();
+  auto get_context = reinterpret_cast<GetContextFn>(
+      dlsym(RTLD_DEFAULT, "_ZN5ImGui17GetCurrentContextEv"));
+  if (!get_context || !get_context()) return;
+
+  using GetIOFn = ImGuiIO& (*)();
+  auto get_io = reinterpret_cast<GetIOFn>(dlsym(RTLD_DEFAULT, "_ZN5ImGui5GetIOEv"));
+  if (!get_io) { done = true; return; }
+  // 控件尺寸本身以字号为基准，FontGlobalScale 会连带放大；不调用
+  // ScaleAllSizes()，避免运行时改动 padding/spacing 破坏窗口 auto-fit 布局。
+  get_io().FontGlobalScale = s;
+  done = true;
+}
+}  // namespace
+
+// ImGui_ImplGlfw_NewFrame() 在 ImGui::NewFrame() 之前调用它，是最早能保证
+// ImGui context 已存在、且窗口 auto-fit 尚未计算尺寸的时机。
+extern "C" void glfwGetFramebufferSize(void* window, int* width, int* height) {
+  using Fn = void (*)(void*, int*, int*);
+  static Fn real = nullptr;
+  if (!real) real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "glfwGetFramebufferSize"));
+  apply_ui_scale();
+  real(window, width, height);
+}
+
+extern "C" void glfwPollEvents() {
+  using Fn = void (*)();
+  static Fn real = nullptr;
+  if (!real) real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "glfwPollEvents"));
+  apply_ui_scale();
+  real();
+}
+
+extern "C" void glfwWaitEvents() {
+  using Fn = void (*)();
+  static Fn real = nullptr;
+  if (!real) real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "glfwWaitEvents"));
+  apply_ui_scale();
+  real();
+}
+
+extern "C" void glfwSwapBuffers(void* window) {
+  using Fn = void (*)(void*);
+  static Fn real = nullptr;
+  if (!real) real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "glfwSwapBuffers"));
+  apply_ui_scale();
+  real(window);
+}
+'''
+
+
+def _ui_scale():
+    """UI 缩放系数（1.0 表示不缩放）。
+
+    桌面环境通过 Xft.dpi 表达缩放（96 = 100%），但容器里的 Dear ImGui 用
+    固定字号，不跟随该设置。可用 SLAM_TOOLBOX_UI_SCALE 手动指定或设为 1 关闭。
+    """
+    forced = os.environ.get("SLAM_TOOLBOX_UI_SCALE", "").strip()
+    if forced:
+        try:
+            return max(1.0, min(float(forced), 4.0))
+        except ValueError:
+            pass
+
+    dpi = None
+    try:
+        out = subprocess.run(
+            ["xrdb", "-query"], capture_output=True, text=True, timeout=3, check=False
+        ).stdout
+        match = re.search(r"^Xft\.dpi:\s*([0-9.]+)", out, re.M)
+        if match:
+            dpi = float(match.group(1))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if dpi is None:
+        try:
+            out = subprocess.run(
+                ["xdpyinfo"], capture_output=True, text=True, timeout=3, check=False
+            ).stdout
+            match = re.search(r"resolution:\s*([0-9]+)x", out)
+            if match:
+                dpi = float(match.group(1))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if dpi is None:
+        return 1.0
+    return max(1.0, min(round((dpi / 96.0) * 4) / 4.0, 2.5))
 
 
 def _is_valid_pose(T):
@@ -349,11 +456,31 @@ def _docker_run_cmd(map_path, rosrun_cmd):
     display = os.environ.get("DISPLAY") or ":0"
     x11_dir = "/tmp/.X11-unix"
     mode = _gl_mode()
-
-    bash_cmd = (
-        "source /root/catkin_ws/devel/setup.bash && "
-        f"{rosrun_cmd}"
-    )
+    scale = _ui_scale()
+    scaler_path = None
+    if scale > 1.01:
+        scaler_path = os.path.join(
+            tempfile.gettempdir(), f"slam_toolbox_ui_scaler_{os.getuid()}.cpp"
+        )
+        Path(scaler_path).write_text(_UI_SCALER_SOURCE, encoding="utf-8")
+        # 编译失败也要让 GUI 正常启动，因此垫片编译放在独立的分组里，
+        # 分组末尾用 ":" 保证退出码为 0。
+        bash_cmd = (
+            "source /root/catkin_ws/devel/setup.bash && "
+            "{ "
+            "g++ -shared -fPIC -O2 -o /tmp/slam_toolbox_ui_scaler.so "
+            "/tmp/slam_toolbox_ui_scaler.cpp -ldl "
+            "-I/root/catkin_ws/src/interactive_slam/thirdparty/imgui "
+            f"&& export LD_PRELOAD=/tmp/slam_toolbox_ui_scaler.so "
+            f"&& export SLAM_TOOLBOX_UI_SCALE={scale:g}; "
+            ":; } && "
+            f"{rosrun_cmd}"
+        )
+    else:
+        bash_cmd = (
+            "source /root/catkin_ws/devel/setup.bash && "
+            f"{rosrun_cmd}"
+        )
 
     # -t requires a real TTY; skip it when invoked from a script / IDE runner.
     cmd = ["docker", "run", "-i"]
@@ -381,6 +508,10 @@ def _docker_run_cmd(map_path, rosrun_cmd):
         "--volume", f"{map_root}:/Map:rw",
         "--volume", f"{map_abs}:/root/Map:rw",
     ])
+    if scaler_path:
+        cmd.extend([
+            "--volume", f"{scaler_path}:/tmp/slam_toolbox_ui_scaler.cpp:ro",
+        ])
 
     if mode == "nvidia":
         # --gpus is required for the NVIDIA container runtime to mount the

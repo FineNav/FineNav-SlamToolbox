@@ -70,6 +70,17 @@ Interactive SLAM 通过 Docker 容器 + X11 转发显示界面，两种环境均
 
 如自动选择有误，可用 `SLAM_TOOLBOX_GPU_MODE=gpu|dri|software` 强制指定渲染后端。
 
+### HiDPI 界面缩放
+
+容器里的 Dear ImGui 使用固定 13px 字体，不跟随桌面的 DPI 缩放，高分辨率屏上
+界面组件会偏小。启动 GUI 时会自动读取宿主机的 `Xft.dpi` 计算缩放系数
+（范围 1.0–2.5），通过在容器内编译并 `LD_PRELOAD` 一个小型垫片放大字体与控件，
+无需修改镜像。可用 `SLAM_TOOLBOX_UI_SCALE` 手动指定系数，设为 `1` 关闭缩放：
+
+```bash
+SLAM_TOOLBOX_UI_SCALE=2 slam_toolbox
+```
+
 ## 许可证
 
 本项目采用 [Mozilla Public License 2.0（MPL-2.0）](LICENSE) 协议开源。

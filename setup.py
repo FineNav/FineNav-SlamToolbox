@@ -8,7 +8,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="slam_toolbox",
-    version="0.2.6",
+    version="0.2.7",
     packages=find_packages(),
     install_requires=[
         "questionary>=2.0.0",

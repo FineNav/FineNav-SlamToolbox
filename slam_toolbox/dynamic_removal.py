@@ -11,7 +11,7 @@ The implementation is split by responsibility across:
 - dynamic_removal_kitti.py: frame/bag to KITTI conversion
 - dynamic_removal_erasor2.py: ERASOR2 workflow
 - dynamic_removal_removert.py: Removert workflow
-- dynamic_removal_local_voxel.py: Local Hash and Raycast voxel workflows
+- dynamic_removal_local_voxel.py: Local Hash / Raycast voxel / 射线清除 workflows
 - dynamic_removal_results.py: result publishing, PCD differences, GIF helpers
 """
 
@@ -57,6 +57,7 @@ from .dynamic_removal_dataset import (
     _require_sensor_trajectory,
 )
 from .dynamic_removal_local_voxel import (
+    start_free_space_carving,
     start_local_hash_voxel,
     start_raycast_voxel,
     _build_algorithm_cli_args,

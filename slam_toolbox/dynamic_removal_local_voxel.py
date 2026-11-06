@@ -435,6 +435,28 @@ _RAYCAST_PARAMETER_SPECS = [
 ]
 
 
+_FSC_PARAMETER_SPECS = [
+    {"key": "seq", "option": "seq", "label": "序列编号", "kind": "str", "description": "要处理的数据序列"},
+    {"key": "pose", "option": "pose", "label": "位姿文件（留空自动选择）", "kind": "str", "optional": True, "description": "覆盖默认 poses_odom_base.txt"},
+    {"key": "start", "option": "start", "label": "起始帧", "kind": "int", "min": 0, "description": "处理的第一帧（包含）"},
+    {"key": "end", "option": "end", "label": "结束帧（留空表示最后一帧）", "kind": "int", "min": 0, "optional": True, "description": "处理的最后一帧（包含）"},
+    {"key": "stride", "option": "stride", "label": "处理帧步长", "kind": "int", "min": 1, "description": "每 N 帧处理一帧"},
+    {"key": "voxel_size", "option": "voxel-size", "label": "Voxel 尺寸（米）", "kind": "float", "positive": True, "description": "体素命中图边长（源默认 0.05）"},
+    {"key": "map_max_range", "option": "map-max-range", "label": "插入门限（米）", "kind": "float", "min": 0, "description": "小车局部 XY 水平距离，更远的点不进图；0 关闭"},
+    {"key": "carve_max_range", "option": "carve-max-range", "label": "射线清除最大长度（米）", "kind": "float", "min": 0, "description": "更远处不做任何假设；与插入门限相互独立，不可合并"},
+    {"key": "hit_cap", "option": "hit-cap", "label": "命中证据封顶", "kind": "int", "min": 1, "description": "动态障碍约 N 帧内消散；关闭射线清除时固定 255"},
+    {"key": "max_rays", "option": "max-rays", "label": "每帧最大射线数", "kind": "int", "min": 1, "description": "等距抽稀，控制单帧 CPU 开销"},
+    {"key": "interval", "option": "interval", "label": "射线清除帧间隔", "kind": "int", "min": 1, "description": "每 N 帧做一次射线清除"},
+    {"key": "ray_origin_offset", "option": "ray-origin-offset", "label": "LiDAR 安装偏移 x,y,z", "kind": "str", "description": "base_link 中的安装位置（米），默认 0,0,0"},
+    {"key": "ray_clearing_enabled", "option": "ray-clearing-enabled", "label": "启用射线清除", "kind": "bool", "description": "关闭则退化为纯命中累计，动态障碍不会被清除"},
+    {"key": "local_z_min", "option": "local-z-min", "label": "局部 Z 下限（米）", "kind": "float", "description": "仅用于 GIF 的 Z 范围与参数关系校验，本算法全高度进图"},
+    {"key": "local_z_max", "option": "local-z-max", "label": "局部 Z 上限（米）", "kind": "float", "description": "仅用于 GIF 的 Z 范围与参数关系校验，本算法全高度进图"},
+    {"key": "write_before", "option": "write-before", "label": "输出清理前点云", "kind": "bool", "description": "写出 before.pcd"},
+    {"key": "save_dynamic_frames", "option": "save-dynamic-frames", "label": "保存逐帧动态点云", "kind": "bool", "description": "用于动态 GIF"},
+    {"key": "progress_interval", "option": "progress-interval", "label": "进度输出间隔", "kind": "int", "min": 0, "description": "每 N 帧输出进度；0 关闭"},
+]
+
+
 def start_local_hash_voxel(map_path):
     """Local hash voxel 动态障碍物清除。"""
     try:
@@ -607,6 +629,94 @@ def start_raycast_voxel(map_path):
         output_dir,
         "raycast_voxel",
         "map_raycast_voxel_static.pcd",
+        dynamic_reference=run_dynamic,
+        before_reference=run_before,
+        static_reference=run_static,
+        z_min=values["local_z_min"],
+        z_max=values["local_z_max"],
+    )
+
+
+def start_free_space_carving(map_path):
+    """射线清除 (Free-Space Carving) 动态障碍物清除。"""
+    try:
+        kitti_root, frame_count = _ensure_local_kitti_dataset(map_path)
+    except Exception as e:
+        console.print(f"[red]射线清除无法运行: {e}[/red]")
+        return
+
+    print(f"\n检测到 {frame_count} 帧，准备运行射线清除 (Free-Space Carving) 动态障碍物清除。\n")
+
+    fsc_defaults = {
+        "seq": "00",
+        "pose": None,
+        "start": 0,
+        "end": None,
+        "stride": 1,
+        "voxel_size": 0.05,
+        "map_max_range": 30.0,
+        "carve_max_range": 8.0,
+        "hit_cap": 8,
+        "max_rays": 800,
+        "interval": 1,
+        "ray_origin_offset": "0,0,0",
+        "ray_clearing_enabled": True,
+        "local_z_min": -5.0,
+        "local_z_max": 5.0,
+        "write_before": True,
+        "save_dynamic_frames": True,
+        "progress_interval": 25,
+    }
+    fsc_defaults = _load_algorithm_parameter_config(
+        map_path,
+        "free_space_carving",
+        _FSC_PARAMETER_SPECS,
+        fsc_defaults,
+    )
+    values = _configure_algorithm_parameters(
+        "射线清除 (Free-Space Carving)",
+        _FSC_PARAMETER_SPECS,
+        fsc_defaults,
+        kitti_root,
+    )
+    if values is None:
+        console.print("[dim]已取消射线清除运行。[/dim]")
+        return
+    _save_algorithm_parameter_config(map_path, "free_space_carving", values)
+
+    output_dir = _timestamped_output_dir(map_path, "free_space_carving")
+    args = _build_algorithm_cli_args(kitti_root, output_dir, _FSC_PARAMETER_SPECS, values)
+
+    ret = _run_python_script(
+        "free_space_carving.py",
+        args,
+        output_dir,
+        "free_space_carving",
+    )
+    if ret != 0:
+        console.print(f"[yellow]射线清除返回非零退出码: {ret}[/yellow]")
+        return
+
+    console.print("\n[bold green]射线清除处理完成！[/bold green]")
+    print(f"  完整输出目录: {output_dir}")
+    run_before = _publish_run_result(
+        os.path.join(output_dir, "fsc_before.pcd"), output_dir, "before.pcd",
+        map_path, "map_free_space_carving_before.pcd", "射线清除 移除前",
+    )
+    run_static = _publish_run_result(
+        os.path.join(output_dir, "fsc_after.pcd"), output_dir, "static.pcd",
+        map_path, "map_free_space_carving_static.pcd", "射线清除 移除后",
+    )
+    run_dynamic = _publish_run_result(
+        os.path.join(output_dir, "fsc_removed.pcd"), output_dir, "dynamic.pcd",
+        map_path, "map_free_space_carving_dynamic.pcd", "射线清除 被移除动态",
+    )
+    _keep_only_standard_run_pcds(output_dir)
+    _prompt_generate_dynamic_gif(
+        map_path,
+        output_dir,
+        "free_space_carving",
+        "map_free_space_carving_static.pcd",
         dynamic_reference=run_dynamic,
         before_reference=run_before,
         static_reference=run_static,

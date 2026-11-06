@@ -179,15 +179,16 @@ def main():
                             title=[("bold ansiyellow", "动态障碍物清除")],
                             disabled="section",
                         ),
-                        "   5. ERASOR2",
-                        "   6. Removert",
-                        "   7. Local Hash Voxel",
-                        "   8. Raycast Voxel",
+                        "   5. 射线清除 (Free-Space Carving)",
+                        "   6. ERASOR2",
+                        "   7. Removert",
+                        "   8. Local Hash Voxel",
+                        "   9. Raycast Voxel",
                         Choice(
                             title=[("bold ansiyellow", "构建全局地图")],
                             disabled="section",
                         ),
-                        "   9. Map Builder",
+                        "   10. Map Builder",
                         Choice(
                             title=[("", "")],
                             disabled="section",
@@ -211,6 +212,9 @@ def main():
                 elif "Interactive SLAM" in sub_action:
                     from .pose_correction import start_interactive_slam
                     start_interactive_slam(map_path)
+                elif "射线清除" in sub_action:
+                    from .dynamic_removal import start_free_space_carving
+                    start_free_space_carving(map_path)
                 elif "ERASOR2" in sub_action:
                     from .dynamic_removal import start_erasor2
                     start_erasor2(map_path)

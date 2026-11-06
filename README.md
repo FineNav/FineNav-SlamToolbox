@@ -57,6 +57,19 @@
 按终端菜单操作即可。地图输出到 `~/Map/<地图名称>/`，其中 `map/` 目录包含最新的
 `map.pcd`（3D 地图）和 `map.pgm`、`map.yaml`（2D 栅格地图）。
 
+## Interactive SLAM GUI 显示
+
+Interactive SLAM 通过 Docker 容器 + X11 转发显示界面，两种环境均可使用：
+
+- **WSL2**：需 Windows 11 的 WSLg（`WSL2_GUI_APPS_ENABLED=1`、`DISPLAY=:0`），
+  或自行安装 VcXsrv 等 X server 并正确设置 `DISPLAY`。WSL 下自动使用 Mesa
+  软件渲染，无需 NVIDIA 容器运行时。
+- **Ubuntu 桌面**：在 X11 / Wayland 桌面会话中运行即可。若主机有 NVIDIA GPU 且
+  已安装 `nvidia-container-toolkit`，会自动启用 GPU 直通；否则回退到
+  `/dev/dri` 或软件渲染。
+
+如自动选择有误，可用 `SLAM_TOOLBOX_GPU_MODE=gpu|dri|software` 强制指定渲染后端。
+
 ## 许可证
 
 本项目采用 [Mozilla Public License 2.0（MPL-2.0）](LICENSE) 协议开源。

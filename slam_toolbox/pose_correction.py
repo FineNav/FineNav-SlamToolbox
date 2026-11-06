@@ -12,9 +12,12 @@
   - Interactive SLAM：通过 Docker GUI 工具交互式修正位姿
 """
 
+import glob
 import os
+import platform
 import shutil
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 import questionary
@@ -27,6 +30,15 @@ console = Console()
 
 # Docker 镜像
 INTERACTIVE_SLAM_IMAGE = "stevenmhy/slamtoolbox-interactive_slam:latest"
+
+# 容器里的 Mesa 通过 X11 拿到的默认 GLX 上下文只有 GLSL 1.40，无法编译
+# interactive_slam 的 #version 330 着色器。版本覆盖把上下文提升到 4.5/450
+# 后着色器才能编译；镜像自带的默认 Cmd 也是这么做的（3.3），但我们的
+# 自定义 Cmd 会绕过它，因此必须显式设置。
+_MESA_GL_ENV = {
+    "MESA_GL_VERSION_OVERRIDE": "4.5",
+    "MESA_GLSL_VERSION_OVERRIDE": "450",
+}
 
 
 def _is_valid_pose(T):
@@ -216,12 +228,43 @@ def _allow_docker_x11():
         console.print("[yellow]警告: 未找到 xhost，Docker GUI 可能无法连接 X11。[/yellow]")
 
 
-def _nvidia_gpu_available():
-    """Return whether the host can expose an NVIDIA GPU to Docker.
+def _is_wsl():
+    """Return whether we are running inside WSL (WSLg or an external X server)."""
+    if "microsoft" in platform.uname().release.lower():
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
 
-    Merely having ``nvidia-smi`` on PATH is not enough: this also performs a
-    short query so that a stale driver installation does not make the GUI
-    launch fail.  ``SLAM_TOOLBOX_DISABLE_GPU=1`` is useful on headless hosts.
+
+def _xauthority_file():
+    """Locate the X authority cookie used by the current desktop session.
+
+    WSLg disables X access control entirely and has no cookie file; native
+    Ubuntu keeps it in ~/.Xauthority (Xorg) or under /run/user/<uid> (GDM /
+    Xwayland), so relying on a single path silently drops GUI access.
+    """
+    run_user = f"/run/user/{os.getuid()}"
+    candidates = [
+        os.environ.get("XAUTHORITY"),
+        os.path.expanduser("~/.Xauthority"),
+        os.path.join(run_user, "gdm", "Xauthority"),
+    ]
+    candidates.extend(sorted(glob.glob(os.path.join(run_user, ".mutter-Xwaylandauth.*"))))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _nvidia_gpu_available():
+    """Return whether the host has a usable NVIDIA driver.
+
+    ``SLAM_TOOLBOX_DISABLE_GPU=1`` is useful on headless hosts.  Note that
+    having ``nvidia-smi`` is NOT proof that Docker can pass the GPU through;
+    see :func:`_docker_gpu_runtime_available`.
     """
     if os.environ.get("SLAM_TOOLBOX_DISABLE_GPU", "").lower() in {"1", "true", "yes"}:
         return False
@@ -239,55 +282,128 @@ def _nvidia_gpu_available():
         return False
 
 
+_DOCKER_GPU_RUNTIME = None
+
+
+def _docker_gpu_runtime_available():
+    """Verify that ``docker run --gpus all`` actually works on this host.
+
+    WSL2 exposes /usr/lib/wsl/lib/nvidia-smi, so ``nvidia-smi -L`` succeeds
+    even though the NVIDIA container runtime is not registered.  Adding
+    ``--gpus all`` then aborts the container before the GUI can start.  Plain
+    Ubuntu boxes without nvidia-container-toolkit have the same problem.
+    """
+    global _DOCKER_GPU_RUNTIME
+    if _DOCKER_GPU_RUNTIME is None:
+        try:
+            _DOCKER_GPU_RUNTIME = subprocess.run(
+                ["docker", "run", "--rm", "--gpus", "all",
+                 INTERACTIVE_SLAM_IMAGE, "/bin/true"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=120,
+            ).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            _DOCKER_GPU_RUNTIME = False
+    return _DOCKER_GPU_RUNTIME
+
+
+_GL_MODE = None
+
+
+def _gl_mode():
+    """Choose the OpenGL backend for the container: nvidia / dri / software."""
+    global _GL_MODE
+    if _GL_MODE is not None:
+        return _GL_MODE
+
+    forced = os.environ.get("SLAM_TOOLBOX_GPU_MODE", "").strip().lower()
+    forced_modes = {
+        "gpu": "nvidia", "nvidia": "nvidia",
+        "dri": "dri", "device": "dri",
+        "software": "software", "soft": "software", "sw": "software",
+    }
+    if forced in forced_modes:
+        _GL_MODE = forced_modes[forced]
+    elif _is_wsl():
+        # WSLg exposes /dev/dri and /dev/dxg, but neither gives this container
+        # hardware GL (both end up on llvmpipe).  Skip the useless device and
+        # force software rendering so the result does not depend on WSLg
+        # internals.  Also avoids `--gpus all`, which has no runtime registered
+        # on WSL even though nvidia-smi works there.
+        _GL_MODE = "software"
+    elif _nvidia_gpu_available() and _docker_gpu_runtime_available():
+        _GL_MODE = "nvidia"
+    elif os.path.isdir("/dev/dri") and os.listdir("/dev/dri"):
+        _GL_MODE = "dri"
+    else:
+        _GL_MODE = "software"
+    return _GL_MODE
+
+
 def _docker_run_cmd(map_path, rosrun_cmd):
     """构建带 X11 和 GPU 配置的 ``docker run`` 命令。"""
     map_abs = os.path.abspath(map_path)
     map_root = os.path.dirname(map_abs)
-    x11_socket = "/tmp/.X11-unix:/tmp/.X11-unix:rw"
-    display = os.environ.get("DISPLAY", ":0")
-    xauthority = os.environ.get("XAUTHORITY") or os.path.expanduser("~/.Xauthority")
+    display = os.environ.get("DISPLAY") or ":0"
+    x11_dir = "/tmp/.X11-unix"
+    mode = _gl_mode()
 
     bash_cmd = (
         "source /root/catkin_ws/devel/setup.bash && "
         f"{rosrun_cmd}"
     )
 
-    cmd = [
-        "docker", "run", "-it",
+    # -t requires a real TTY; skip it when invoked from a script / IDE runner.
+    cmd = ["docker", "run", "-i"]
+    if sys.stdin.isatty():
+        cmd.append("-t")
+    cmd.extend([
         "--net=host",
         "--env", f"DISPLAY={display}",
         "--env", "HOME=/root",
         "--env", "QT_X11_NO_MITSHM=1",
-        "--volume", f"{x11_socket}",
-        # Preserve both the exact host path and convenient container aliases.
-        # Some interactive_slam file dialogs retain absolute paths, so mounting
-        # only at /Map is not sufficient for ~/Map/... selections.
+    ])
+    # External X servers (VcXsrv on WSL) are reached by hostname instead of
+    # through a local Unix socket.
+    if "host.docker.internal" in display:
+        cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
+    # WSL without WSLg has no local X socket at all; mounting an empty path
+    # would just create a stray root-owned directory on the host.
+    if os.path.isdir(x11_dir) and os.listdir(x11_dir):
+        cmd.extend(["--volume", f"{x11_dir}:{x11_dir}:rw"])
+    # Preserve both the exact host path and convenient container aliases.
+    # Some interactive_slam file dialogs retain absolute paths, so mounting
+    # only at /Map is not sufficient for ~/Map/... selections.
+    cmd.extend([
         "--volume", f"{map_root}:{map_root}:rw",
         "--volume", f"{map_root}:/Map:rw",
         "--volume", f"{map_abs}:/root/Map:rw",
-    ]
+    ])
 
-    if _nvidia_gpu_available():
+    if mode == "nvidia":
         # --gpus is required for the NVIDIA container runtime to mount the
-        # matching libGLX/libEGL libraries and /dev/nvidia* devices.  Without
-        # it Mesa sees an nvidia-drm driver name but cannot load its DRI file.
-        cmd[2:2] = ["--gpus", "all"]
+        # matching libGLX/libEGL libraries and /dev/nvidia* devices.
         cmd.extend([
+            "--gpus", "all",
             "--env", "NVIDIA_DRIVER_CAPABILITIES=graphics,utility,display",
         ])
     else:
-        # Keep GUI usable on non-NVIDIA machines (or when explicitly disabled)
-        # through the host's DRI device, using Mesa software rendering only as
-        # a last resort when no render device exists.
-        if os.path.exists("/dev/dri"):
+        # Mesa-based rendering.  WSLg's /dev/dri and /dev/dxg only give the
+        # container a GLSL 1.40 context, so the version overrides are needed
+        # regardless of whether a render device is exposed.  On native Ubuntu
+        # they are harmless and also cover Xwayland / remote-X sessions where
+        # GLX falls back to a legacy 2.1 context.
+        if mode == "dri":
             cmd.extend(["--device", "/dev/dri"])
         else:
-            cmd.extend([
-                "--env", "LIBGL_ALWAYS_SOFTWARE=1",
-                "--env", "MESA_GL_VERSION_OVERRIDE=4.5",
-                "--env", "MESA_GLSL_VERSION_OVERRIDE=450",
-            ])
-    if os.path.exists(xauthority):
+            cmd.extend(["--env", "LIBGL_ALWAYS_SOFTWARE=1"])
+        for key, value in _MESA_GL_ENV.items():
+            cmd.extend(["--env", f"{key}={value}"])
+
+    xauthority = _xauthority_file()
+    if xauthority:
         cmd.extend([
             "--env", "XAUTHORITY=/tmp/.docker.xauth",
             "--volume", f"{xauthority}:/tmp/.docker.xauth:ro",
@@ -332,6 +448,20 @@ def start_interactive_slam(map_path):
     container_map_path = os.path.join(os.path.dirname(map_abs), map_name)
     original_dir = os.path.join(map_path, "interactive_slam", "original")
     corrected_dir = os.path.join(map_path, "interactive_slam", "corrected")
+
+    if shutil.which("docker") is None:
+        console.print("[red]未找到 docker 命令，请先安装 Docker 并确保当前用户可运行。[/red]")
+        return
+
+    mode = _gl_mode()
+    console.print(
+        f"[dim]显示后端: {mode}（可用 SLAM_TOOLBOX_GPU_MODE=gpu|dri|software 覆盖）[/dim]"
+    )
+    if _is_wsl() and not os.environ.get("DISPLAY"):
+        console.print(
+            "[yellow]⚠ 未检测到 DISPLAY，WSL 需启用 WSLg 或安装 X server（如 VcXsrv）"
+            "并正确设置 DISPLAY。[/yellow]"
+        )
 
     # ==================== 阶段 1: odometry2graph ====================
     console.print(

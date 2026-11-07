@@ -6,6 +6,7 @@
 
 """KITTI dataset preparation shared by dynamic-removal workflows."""
 
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -14,7 +15,7 @@ import numpy as np
 import yaml
 
 from .dynamic_removal_common import console
-from .dynamic_removal_kitti import convert_bag_to_kitti
+from .dynamic_removal_kitti import convert_bag_to_kitti, convert_frames_to_kitti
 
 def _load_map_config(map_path):
     config_path = os.path.join(map_path, "config.yaml")
@@ -159,6 +160,65 @@ def _ensure_local_kitti_dataset(map_path):
     kitti_root, frame_count = convert_bag_to_kitti(map_path, _load_map_config(map_path))
     _require_sensor_trajectory(seq_dir)
     return kitti_root, frame_count
+
+
+def _frames_signature(pcd_files, odom_files):
+    """frame/ 内容指纹：位姿按内容、点云按文件名/大小/时间，用于判断数据集是否过时。"""
+    digest = hashlib.sha256()
+    for path in pcd_files:
+        stat = path.stat()
+        digest.update(f"pcd {path.name} {stat.st_size} {stat.st_mtime_ns}\n".encode())
+    for path in odom_files:
+        digest.update(f"odom {path.name}\n".encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _ensure_frames_kitti_dataset(map_path):
+    """确保存在由 frame/*.pcd + frame/*.odom 位姿生成的逐帧 KITTI 数据集。
+
+    位姿直接来自 frame/（含平面约束、Interactive SLAM 的修正结果），不从原始
+    bag 的 TF 推导；输出到独立目录，避免覆盖其他方法使用的 bag 逐扫描数据集。
+    frame/ 内容变化（尤其是位姿修正）后会自动重建，避免使用旧位姿。
+    """
+    frame_dir = Path(map_path) / "frame"
+    pcd_files = sorted(frame_dir.glob("*.pcd"))
+    odom_files = sorted(frame_dir.glob("*.odom"))
+    if not pcd_files:
+        raise FileNotFoundError(
+            f"frame/ 中没有 .pcd 文件: {frame_dir}；请先运行 Frame Extractor"
+        )
+
+    kitti_root = os.path.join(map_path, "free_space_carving_dataset")
+    seq_dir = os.path.join(kitti_root, "dataset", "sequences", "00")
+    velodyne_dir = os.path.join(seq_dir, "velodyne")
+    pose_path = os.path.join(seq_dir, "poses_odom_base.txt")
+    notes_path = Path(seq_dir) / "conversion_notes.txt"
+    signature = _frames_signature(pcd_files, odom_files)
+    marker = f"frame_signature: {signature}"
+
+    bin_count = (
+        len(list(Path(velodyne_dir).glob("*.bin")))
+        if os.path.isdir(velodyne_dir) else 0
+    )
+    notes = notes_path.read_text(errors="replace") if notes_path.exists() else ""
+    reused = (
+        bin_count == len(pcd_files)
+        and os.path.exists(pose_path)
+        and "pose_source: frame_odom_base" in notes
+        and marker in notes
+    )
+    if reused:
+        _require_sensor_trajectory(seq_dir)
+        print(f"复用已有 frame 位姿 KITTI 数据集: {velodyne_dir} ({bin_count} 帧)")
+        return kitti_root, bin_count
+
+    print("从 frame/*.pcd 点云与 frame/*.odom 位姿生成 KITTI 数据集...")
+    root, frame_count = convert_frames_to_kitti(map_path, kitti_root=kitti_root)
+    with notes_path.open("a", encoding="utf-8") as f:
+        f.write(marker + "\n")
+    _require_sensor_trajectory(seq_dir)
+    return root, frame_count
 
 
 def _require_sensor_trajectory(seq_dir):

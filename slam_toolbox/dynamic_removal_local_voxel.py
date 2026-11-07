@@ -22,7 +22,10 @@ from .dynamic_removal_common import (
     _timestamped_output_dir,
     console,
 )
-from .dynamic_removal_dataset import _ensure_local_kitti_dataset
+from .dynamic_removal_dataset import (
+    _ensure_frames_kitti_dataset,
+    _ensure_local_kitti_dataset,
+)
 from .dynamic_removal_results import (
     _keep_only_standard_run_pcds,
     _prompt_generate_dynamic_gif,
@@ -638,14 +641,21 @@ def start_raycast_voxel(map_path):
 
 
 def start_free_space_carving(map_path):
-    """射线清除 (Free-Space Carving) 动态障碍物清除。"""
+    """射线清除 (Free-Space Carving) 动态障碍物清除。
+
+    使用 frame/ 中的逐帧点云与其 .odom 位姿（含位姿修正），不从原始 bag
+    的 TF 推导出点云与位姿，保证射线原点与构建全局地图时的轨迹一致。
+    """
     try:
-        kitti_root, frame_count = _ensure_local_kitti_dataset(map_path)
+        kitti_root, frame_count = _ensure_frames_kitti_dataset(map_path)
     except Exception as e:
         console.print(f"[red]射线清除无法运行: {e}[/red]")
         return
 
-    print(f"\n检测到 {frame_count} 帧，准备运行射线清除 (Free-Space Carving) 动态障碍物清除。\n")
+    print(
+        f"\n检测到 {frame_count} 帧（位姿来自 frame/*.odom），"
+        f"准备运行射线清除 (Free-Space Carving) 动态障碍物清除。\n"
+    )
 
     fsc_defaults = {
         "seq": "00",

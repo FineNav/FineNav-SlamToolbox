@@ -9,7 +9,8 @@
 
 算法移植自 mid360_localization/launch/localization.py 的 ``VoxelHitMap``
 （逐帧整数命中图 + 对称 hit/miss 射线清除），把 ROS2 在线流程改成对
-``velodyne/*.bin`` + ``poses_odom_base.txt`` 的离线回放：
+``velodyne/*.bin`` + ``poses_odom_base.txt`` 的离线回放（工作流从
+``frame/*.pcd`` 与 ``frame/*.odom`` 生成这两个文件，位姿含位姿修正结果）：
 
   1. 每帧用真实位姿把局部点云变换到世界系，按水平 XY 距离门限
      ``map_max_range`` 过滤；

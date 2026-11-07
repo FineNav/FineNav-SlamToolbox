@@ -34,18 +34,24 @@ from .extractor import (
 # 帧 → KITTI 格式转换
 # ---------------------------------------------------------------------------
 
-def convert_frames_to_kitti(map_path):
-    """将 frame/ 中的 PCD + .odom 转为 KITTI 格式，输出到 map_path/erasor2_dataset/。
+def convert_frames_to_kitti(map_path, kitti_root=None):
+    """将 frame/ 中的 PCD + .odom 转为 KITTI 格式。
+
+    位姿直接取自 frame/*.odom（含平面约束 / Interactive SLAM 修正），
+    不读取原始 bag 的 TF。默认输出到 map_path/erasor2_dataset/；可通过
+    kitti_root 指定独立目录，避免与 bag 逐扫描数据集互相覆盖。
 
     Returns:
         (kitti_root, frame_count) — kitti_root 是 dataset 根目录路径
     """
     frame_dir = os.path.join(map_path, "frame")
-    kitti_root = os.path.join(map_path, "erasor2_dataset")
+    kitti_root = kitti_root or os.path.join(map_path, "erasor2_dataset")
     seq_dir = os.path.join(kitti_root, "dataset", "sequences", "00")
     velodyne_dir = os.path.join(seq_dir, "velodyne")
     labels_dir = os.path.join(seq_dir, "labels")
 
+    if os.path.isdir(seq_dir):
+        shutil.rmtree(seq_dir)
     os.makedirs(velodyne_dir, exist_ok=True)
     os.makedirs(labels_dir, exist_ok=True)
 
@@ -107,8 +113,9 @@ def convert_frames_to_kitti(map_path):
         f"converted from: {frame_dir}\n"
         f"frames_written: {len(files)}\n"
         "cloud_frame: base_link (extracted frames)\n"
+        "pose_source: frame_odom_base\n"
         "poses_suma_optim.txt is compensated for ERASOR2 SemanticKITTILoader.\n"
-        "poses_odom_base.txt contains the true odom -> base_link matrices.\n"
+        "poses_odom_base.txt contains the true odom -> base_link matrices read from frame/*.odom.\n"
         "labels/*.label are zero placeholders for size compatibility.\n"
     )
 

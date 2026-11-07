@@ -49,6 +49,7 @@ from .dynamic_removal_erasor2 import (
     _voxel_limit_xyzi,
 )
 from .dynamic_removal_dataset import (
+    _ensure_frames_kitti_dataset,
     _ensure_kitti_dataset,
     _ensure_local_kitti_dataset,
     _has_current_bag_local_transform,
